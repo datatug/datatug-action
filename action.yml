@@ -3,10 +3,10 @@ description: Run DataTug project validator on your repository
 author: datatug
 
 inputs:
-  args:
-    description: Arguments to pass to DataTug  CLI
+  dir:
+    description: Path to DataTug project directory
     required: false
-    default: ""
+    default: "."
 
 runs:
   using: composite
@@ -68,4 +68,4 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        datatug validate ${{ inputs.args }}
+        datatug validate -d=${{ inputs.dir }}
