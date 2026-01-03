@@ -68,4 +68,4 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        datatug ${{ inputs.args }}
+        datatug validate ${{ inputs.args }}
