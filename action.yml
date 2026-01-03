@@ -6,7 +6,7 @@ inputs:
   dir:
     description: Path to DataTug project directory
     required: false
-    default: "."
+    default: ""
 
 runs:
   using: composite
@@ -68,4 +68,4 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        datatug validate -d=${{ inputs.dir }}
+        datatug validate -d="${GITHUB_WORKSPACE}/${{ inputs.dir }}"
