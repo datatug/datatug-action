@@ -55,13 +55,14 @@ runs:
         ARCHIVE="datatug_${VERSION}_${OS}_${ARCH}.tar.gz"
         URL="https://github.com/datatug/datatug-cli/releases/download/${TAG}/${ARCHIVE}"
 
-        echo "Attempting to download:"
-        echo "$URL"
+        echo "Downloading: $URL"
 
-        curl -fL "$URL" | tar xz
-        chmod +x datatug
+        TMPDIR="$(mktemp -d)"
+        curl -fL "$URL" | tar -xz -C "$TMPDIR"
 
-        echo "$PWD" >> "$GITHUB_PATH"
+        chmod +x "$TMPDIR/datatug"
+
+        echo "$TMPDIR" >> "$GITHUB_PATH"
 
     - name: Run datatug
       shell: bash
