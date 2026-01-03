@@ -1,0 +1,70 @@
+name: DataTug
+description: Run DataTug project validator on your repository
+author: datatug
+
+inputs:
+  args:
+    description: Arguments to pass to DataTug  CLI
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Detect OS and architecture
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        OS="$(uname | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m)"
+
+        case "$ARCH" in
+          x86_64) ARCH=amd64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *)
+            echo "Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+        esac
+
+        echo "OS=$OS" >> "$GITHUB_ENV"
+        echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+
+    - name: Download latest DataTug release
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        API_URL="https://api.github.com/repos/datatug/datatug-cli/releases/latest"
+        echo "Fetching latest release from: $API_URL"
+
+        TAG=$(curl -fsSL "$API_URL" | jq -r '.tag_name')
+
+        VERSION="${TAG#v}"   # removes leading 'v' if present
+
+        if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+          echo "Failed to determine latest datatug release"
+          exit 1
+        fi
+
+        echo "Using datatug version: $TAG"
+        echo "Detected OS: $OS"
+        echo "Detected ARCH: $ARCH"
+
+        ARCHIVE="datatug_${VERSION}_${OS}_${ARCH}.tar.gz"
+        URL="https://github.com/datatug/datatug-cli/releases/download/${TAG}/${ARCHIVE}"
+
+        echo "Attempting to download:"
+        echo "$URL"
+
+        curl -fL "$URL" | tar xz
+        chmod +x datatug
+
+        echo "$PWD" >> "$GITHUB_PATH"
+
+    - name: Run datatug
+      shell: bash
+      run: |
+        set -euo pipefail
+        datatug ${{ inputs.args }}
