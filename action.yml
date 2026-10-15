@@ -36,7 +36,7 @@ runs:
       run: |
         set -euo pipefail
 
-        API_URL="https://api.github.com/repos/datatug/datatug-cli/releases/latest"
+        API_URL="https://api.github.com/repos/datatug/datatug/releases/latest"
         echo "Fetching latest release from: $API_URL"
 
         TAG=$(curl -fsSL "$API_URL" | jq -r '.tag_name')
@@ -53,7 +53,7 @@ runs:
         echo "Detected ARCH: $ARCH"
 
         ARCHIVE="datatug_${VERSION}_${OS}_${ARCH}.tar.gz"
-        URL="https://github.com/datatug/datatug-cli/releases/download/${TAG}/${ARCHIVE}"
+        URL="https://github.com/datatug/datatug/releases/download/${TAG}/${ARCHIVE}"
 
         echo "Downloading: $URL"
 
