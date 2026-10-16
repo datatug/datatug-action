@@ -1,0 +1,84 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-cache-tests:
+    name: Release and cache fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout action source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # actions/checkout v6
+
+      - name: Exercise release metadata, cache key, checksum, install and path handling
+        run: scripts/test-datatug-cli.sh
+
+  validate-pinned-demo:
+    name: Validate demo with the released CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout action source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # actions/checkout v6
+        with:
+          path: action
+
+      - name: Checkout demo project
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # actions/checkout v6
+        with:
+          repository: datatug/datatug-demo-project
+          ref: main
+          path: demo
+          persist-credentials: false
+
+      - name: Read the pinned Chinook revision
+        id: chinook
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin=demo/demo-project-1/fixtures/chinook/phase1-acceptance.json
+          {
+            echo "repository=$(jq -r .database.repository "$pin" | sed 's#https://github.com/##')"
+            echo "revision=$(jq -r .database.revision "$pin")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned Chinook data
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # actions/checkout v6
+        with:
+          repository: ${{ steps.chinook.outputs.repository }}
+          ref: ${{ steps.chinook.outputs.revision }}
+          path: demo/.chinook-source
+          persist-credentials: false
+
+      - name: Prepare the pinned SQLite fixture
+        run: >-
+          python3 demo/scripts/prepare_chinook.py
+          demo/.chinook-source/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
+          demo/demo-project-1/.demo-data/chinook.sqlite
+
+      - name: Validate the demo with the published CLI
+        id: validate
+        uses: ./action
+        with:
+          dir: demo/demo-project-1
+
+      - name: Confirm the verified archive is available to a second action call
+        id: cache-hit
+        uses: ./action
+        with:
+          dir: demo/demo-project-1
+
+      - name: Require a verified cache hit
+        env:
+          CACHE_HIT: ${{ steps.cache-hit.outputs.cache-hit }}
+          CLI_VERSION: ${{ steps.cache-hit.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$CACHE_HIT" == true ]] || { echo "second action call did not restore the CLI cache" >&2; exit 1; }
+          [[ "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unexpected CLI version: $CLI_VERSION" >&2; exit 1; }

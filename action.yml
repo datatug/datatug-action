@@ -1,71 +1,74 @@
 name: DataTug
-description: Run DataTug project validator on your repository
+description: Install the latest verified DataTug CLI and validate a project
 author: datatug
 
 inputs:
   dir:
-    description: Path to DataTug project directory
+    description: Relative path to the DataTug project directory in the workspace
     required: false
     default: ""
+
+outputs:
+  version:
+    description: Version of the installed DataTug CLI
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: Absolute path to the installed DataTug executable
+    value: ${{ steps.install.outputs.path }}
+  cache-hit:
+    description: Whether the verified CLI archive came from the Actions cache
+    value: ${{ steps.cli-cache.outputs.cache-hit }}
 
 runs:
   using: composite
   steps:
-    - name: Detect OS and architecture
+    - name: Resolve latest stable DataTug release
+      id: release
       shell: bash
-      run: |
-        set -euo pipefail
+      env:
+        DATATUG_GITHUB_TOKEN: ${{ github.token }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" resolve
 
-        OS="$(uname | tr '[:upper:]' '[:lower:]')"
-        ARCH="$(uname -m)"
+    - name: Restore verified CLI archive
+      id: cli-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache v6
+      with:
+        path: ${{ runner.temp }}/datatug-cli-cache/${{ steps.release.outputs.archive }}
+        key: ${{ steps.release.outputs.cache-key }}
 
-        case "$ARCH" in
-          x86_64) ARCH=amd64 ;;
-          aarch64|arm64) ARCH=arm64 ;;
-          *)
-            echo "Unsupported architecture: $ARCH"
-            exit 1
-            ;;
-        esac
-
-        echo "OS=$OS" >> "$GITHUB_ENV"
-        echo "ARCH=$ARCH" >> "$GITHUB_ENV"
-
-    - name: Download latest DataTug release
+    - name: Download CLI archive on a cache miss
+      if: steps.cli-cache.outputs.cache-hit != 'true'
       shell: bash
-      run: |
-        set -euo pipefail
+      env:
+        DATATUG_RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        DATATUG_ARCHIVE: ${{ steps.release.outputs.archive }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" download
 
-        API_URL="https://api.github.com/repos/datatug/datatug/releases/latest"
-        echo "Fetching latest release from: $API_URL"
-
-        TAG=$(curl -fsSL "$API_URL" | jq -r '.tag_name')
-
-        VERSION="${TAG#v}"   # removes leading 'v' if present
-
-        if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-          echo "Failed to determine latest datatug release"
-          exit 1
-        fi
-
-        echo "Using datatug version: $TAG"
-        echo "Detected OS: $OS"
-        echo "Detected ARCH: $ARCH"
-
-        ARCHIVE="datatug_${VERSION}_${OS}_${ARCH}.tar.gz"
-        URL="https://github.com/datatug/datatug/releases/download/${TAG}/${ARCHIVE}"
-
-        echo "Downloading: $URL"
-
-        TMPDIR="$(mktemp -d)"
-        curl -fL "$URL" | tar -xz -C "$TMPDIR"
-
-        chmod +x "$TMPDIR/datatug"
-
-        echo "$TMPDIR" >> "$GITHUB_PATH"
-
-    - name: Run datatug
+    - name: Verify CLI archive checksum
       shell: bash
-      run: |
-        set -euo pipefail
-        datatug validate -d="${GITHUB_WORKSPACE}/${{ inputs.dir }}"
+      env:
+        DATATUG_ARCHIVE: ${{ steps.release.outputs.archive }}
+        DATATUG_EXPECTED_SHA256: ${{ steps.release.outputs.sha256 }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" verify
+
+    - name: Save verified CLI archive
+      if: steps.cli-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache v6
+      with:
+        path: ${{ runner.temp }}/datatug-cli-cache/${{ steps.release.outputs.archive }}
+        key: ${{ steps.release.outputs.cache-key }}
+
+    - name: Install verified CLI
+      id: install
+      shell: bash
+      env:
+        DATATUG_ARCHIVE: ${{ steps.release.outputs.archive }}
+        DATATUG_EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" install
+
+    - name: Validate DataTug project
+      shell: bash
+      env:
+        DATATUG_CLI: ${{ steps.install.outputs.path }}
+        DATATUG_PROJECT_DIR: ${{ inputs.dir }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" validate
