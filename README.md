@@ -51,8 +51,8 @@ steps:
       dir: demo-project
       environment: ci
       checks: |
-        invoices.reconcile
-        accounts.have-owner
+        invoices-reconcile
+        accounts-have-owner
       local-owner: 'true'
       timeout: 30s
       warnings: fail
