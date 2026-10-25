@@ -1,12 +1,47 @@
 name: DataTug
-description: Install the latest verified DataTug CLI and validate a project
+description: Install the verified DataTug CLI and validate a project or run named Checks
 author: datatug
+branding:
+  icon: check-circle
+  color: blue
 
 inputs:
+  mode:
+    description: 'Operation: validate (backward-compatible default) or checks'
+    required: false
+    default: validate
   dir:
     description: Relative path to the DataTug project directory in the workspace
     required: false
-    default: ""
+    default: ''
+  version:
+    description: Stable DataTug CLI version without a v prefix; defaults to latest stable
+    required: false
+    default: ''
+  environment:
+    description: Named DataTug environment to use in checks mode
+    required: false
+    default: ''
+  checks:
+    description: Newline-separated named Check IDs to run in checks mode
+    required: false
+    default: ''
+  local-owner:
+    description: Explicit consent for the CLI local-owner execution mode
+    required: false
+    default: 'false'
+  timeout:
+    description: Per-invocation timeout from 1s through 3600s or 1m through 60m (for example 30s)
+    required: false
+    default: 30s
+  warnings:
+    description: Whether Check warnings fail the action (fail) or are ignored (ignore)
+    required: false
+    default: fail
+  endpoint:
+    description: Optional execution endpoint; currently unsupported and rejected if set
+    required: false
+    default: ''
 
 outputs:
   version:
@@ -18,15 +53,31 @@ outputs:
   cache-hit:
     description: Whether the verified CLI archive came from the Actions cache
     value: ${{ steps.cli-cache.outputs.cache-hit }}
+  status:
+    description: Safe top-level Checks status in checks mode
+    value: ${{ steps.checks.outputs.status }}
+  exit-code:
+    description: DataTug Checks exit code in checks mode
+    value: ${{ steps.checks.outputs.exit-code }}
+  result-json:
+    description: Sanitized DataTug result envelope in checks mode
+    value: ${{ steps.checks.outputs.result-json }}
 
 runs:
   using: composite
   steps:
-    - name: Resolve latest stable DataTug release
+    - name: Validate operation mode
+      shell: bash
+      env:
+        DATATUG_MODE: ${{ inputs.mode }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" mode
+
+    - name: Resolve verified DataTug release
       id: release
       shell: bash
       env:
         DATATUG_GITHUB_TOKEN: ${{ github.token }}
+        DATATUG_CLI_VERSION: ${{ inputs.version }}
       run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" resolve
 
     - name: Restore verified CLI archive
@@ -67,8 +118,27 @@ runs:
       run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" install
 
     - name: Validate DataTug project
+      if: inputs.mode == 'validate'
       shell: bash
       env:
         DATATUG_CLI: ${{ steps.install.outputs.path }}
         DATATUG_PROJECT_DIR: ${{ inputs.dir }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
       run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" validate
+
+    - name: Run DataTug Checks
+      id: checks
+      if: inputs.mode == 'checks'
+      shell: bash
+      env:
+        DATATUG_CLI: ${{ steps.install.outputs.path }}
+        DATATUG_PROJECT_DIR: ${{ inputs.dir }}
+        DATATUG_MODE: ${{ inputs.mode }}
+        DATATUG_ENVIRONMENT: ${{ inputs.environment }}
+        DATATUG_CHECKS: ${{ inputs.checks }}
+        DATATUG_LOCAL_OWNER: ${{ inputs.local-owner }}
+        DATATUG_TIMEOUT: ${{ inputs.timeout }}
+        DATATUG_WARNINGS: ${{ inputs.warnings }}
+        DATATUG_ENDPOINT: ${{ inputs.endpoint }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+      run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" checks
