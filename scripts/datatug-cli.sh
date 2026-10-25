@@ -193,7 +193,7 @@ checks_fail() {
     {
       # shellcheck disable=SC2016 # Backticks are Markdown code delimiters, not shell substitutions.
       printf '## DataTug Checks: `%s`\n\n%s\n' "$status" "$summary_message"
-      printf '\nHosted result references are not supported for private CI evidence. [Open DataTug.app](https://datatug.app)\n'
+      printf '\nNo summary was uploaded. [Open DataTug.app](https://datatug.app)\n'
     } >> "$GITHUB_STEP_SUMMARY"
   fi
   printf 'datatug-action: %s\n' "$summary_message" >&2
@@ -239,6 +239,8 @@ check_run() (
   [[ "${DATATUG_WARNINGS:-}" == fail || "${DATATUG_WARNINGS:-}" == ignore ]] \
     || checks_fail configuration_error 2
   [[ -n "${DATATUG_CHECKS:-}" ]] || checks_fail configuration_error 2
+  [[ "${DATATUG_PUBLISH_SUMMARY:-false}" == true || "${DATATUG_PUBLISH_SUMMARY:-false}" == false ]] \
+    || checks_fail configuration_error 2
 
   local project_dir evidence_dir raw_file safe_file cli_status item check_count=0 seen_checks=' '
   project_dir="$(resolve_project_dir)"
@@ -259,6 +261,9 @@ check_run() (
   raw_file="$evidence_dir/child-output.json"
   safe_file="$evidence_dir/result.json"
   args+=(--local-owner --evidence-dir "$evidence_dir" --timeout "$DATATUG_TIMEOUT" --warnings "$DATATUG_WARNINGS" --format json)
+  if [[ "${DATATUG_PUBLISH_SUMMARY:-false}" == true ]]; then
+    args+=(--publish-summary --summary-space "${DATATUG_SUMMARY_SPACE:-}" --summary-token-env DATATUG_SUMMARY_TOKEN)
+  fi
 
   set +e
   python3 - "$DATATUG_TIMEOUT" "$raw_file" "$DATATUG_CLI" "${args[@]}" <<'PY'
@@ -302,10 +307,14 @@ try:
     child_env = os.environ.copy()
     child_env["DATATUG_TELEMETRY"] = "0"
     child_env["DATATUG_CLIENT"] = ""
+    if child_env.get("DATATUG_PUBLISH_SUMMARY") != "true":
+        child_env.pop("DATATUG_SUMMARY_TOKEN", None)
     process = subprocess.Popen([executable, *argv], stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                start_new_session=True, env=child_env)
-    deadline = time.monotonic() + seconds
+    # The CLI enforces its deadline; allow bounded output-flush time when an
+    # optional upload reaches that deadline without changing the local result.
+    deadline = time.monotonic() + seconds + (1 if child_env.get("DATATUG_PUBLISH_SUMMARY") == "true" else 0)
     captured = bytearray()
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -374,9 +383,10 @@ PY
       (.outcome | IN("pass","fail","unknown")) and
       (.severity | IN("","info","warning","error","critical")) and
       (.durationMs | type == "number" and . >= 0)
-    )) and
-    .deepLink == "https://datatug.app" and .deepLinkReason == "hosted_result_reference_unsupported"
+    ))
   ' "$raw_file" >/dev/null 2>/dev/null || checks_fail error 4
+  python3 "$(dirname "${BASH_SOURCE[0]}")/check-summary-link.py" "$raw_file" "$project_dir" \
+    2>/dev/null || checks_fail error 4
   jq -c '{schemaVersion,status,exitCode,checks:[.checks[] | {index,status,executionStatus,outcome,severity,durationMs}],deepLink,deepLinkReason}' \
     "$raw_file" > "$safe_file" 2>/dev/null || checks_fail error 4
   chmod 600 "$raw_file" "$safe_file"
@@ -394,7 +404,16 @@ PY
     printf '## DataTug Checks: `%s`\n\n' "$status"
     printf 'Environment: `%s`  \nChecks run: %s\n\n' \
       "$DATATUG_ENVIRONMENT" "$(jq '.checks | length' "$safe_file")"
-    printf 'Hosted result references are not supported for private CI evidence. [Open DataTug.app](https://datatug.app)\n'
+    local deep_link deep_link_reason
+    deep_link="$(jq -r .deepLink "$safe_file")"
+    deep_link_reason="$(jq -r .deepLinkReason "$safe_file")"
+    if [[ "$deep_link_reason" == hosted_summary_published ]]; then
+      printf '[Open this Check summary in DataTug.app](%s) (sign-in and current permissions required; expires after seven days).\n' "$deep_link"
+    elif [[ "$deep_link_reason" == summary_publish_* ]]; then
+      printf 'Optional summary upload was unavailable (%s). The local Check outcome above is unchanged.\n' "$deep_link_reason"
+    else
+      printf 'No summary was uploaded. [Open DataTug.app](https://datatug.app)\n'
+    fi
   } >> "$GITHUB_STEP_SUMMARY"
   exit "$exit_code"
 )

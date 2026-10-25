@@ -74,10 +74,22 @@ The Action emits the safe Checks status, exit code, and a sanitized JSON result
 envelope as outputs. Its job summary includes the status and check count. Exit
 codes distinguish business failure/unknown (1), configuration error (2),
 missing resource (3), execution error (4), access denied (5), timeout (124),
-and cancellation (130). A result reference currently opens only
-`https://datatug.app`; hosted result pages for private CI evidence are not yet
-supported. Raw evidence remains in a private runner temporary directory and is
-never uploaded as an artifact.
+and cancellation (130). Raw evidence remains in a private runner temporary
+directory and is never uploaded as an artifact.
+
+Optional `publish-summary: 'true'` uploads only project/environment/Check
+identifiers and versions, execution time, status, severity and duration. Set
+`summary-space` to the existing hosted Space and `summary-token` from a GitHub
+secret with current project permission. The matching project and Check versions
+must already exist there. SQL, rows, inputs, definitions, credentials and raw
+errors are excluded. Upload is off by default; a failed upload preserves the
+local Check outcome and reports a separate bounded reason. A successful link
+opens the native DataTug.app project overview, requires sign-in and current
+permissions, and expires after seven days. The Action validates its scope before
+including it in the job summary. This capability requires the candidate CLI and
+a separately enabled hosted API; it is not available in the currently published
+CLI. The supervisor allows one additional second for the CLI to emit its local
+result if optional publication reaches the execution deadline.
 
 See [SECURITY.md](SECURITY.md) for the trust and data-handling boundaries.
 The Action supports GitHub-hosted Linux and macOS runners on X64 and ARM64.

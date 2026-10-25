@@ -43,6 +43,19 @@ inputs:
     required: false
     default: ''
 
+  publish-summary:
+    description: Explicitly upload a minimal client-reported summary with seven-day retention
+    required: false
+    default: 'false'
+  summary-space:
+    description: Hosted Space containing the matching project and Check versions
+    required: false
+    default: ''
+  summary-token:
+    description: DataTug bearer token supplied from a GitHub secret for optional summary upload
+    required: false
+    default: ''
+
 outputs:
   version:
     description: Version of the installed DataTug CLI
@@ -140,5 +153,8 @@ runs:
         DATATUG_TIMEOUT: ${{ inputs.timeout }}
         DATATUG_WARNINGS: ${{ inputs.warnings }}
         DATATUG_ENDPOINT: ${{ inputs.endpoint }}
+        DATATUG_PUBLISH_SUMMARY: ${{ inputs.publish-summary }}
+        DATATUG_SUMMARY_SPACE: ${{ inputs.summary-space }}
+        DATATUG_SUMMARY_TOKEN: ${{ inputs.summary-token }}
         GITHUB_WORKSPACE: ${{ github.workspace }}
       run: bash "${{ github.action_path }}/scripts/datatug-cli.sh" checks

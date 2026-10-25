@@ -214,7 +214,7 @@ grep -Fx -- '--warnings' "$check_args_log" >/dev/null
 grep -Fx -- '--format' "$check_args_log" >/dev/null
 grep -Fx '0|x' "$temp_dir/check-env.log" >/dev/null
 grep -F 'hosted_result_reference_unsupported' "$checks_output" >/dev/null
-grep -F 'Hosted result references are not supported' "$checks_summary" >/dev/null
+grep -F 'No summary was uploaded' "$checks_summary" >/dev/null
 
 expect_check_failure() {
   local name="$1" status="$2" code="$3"; shift 3
@@ -367,5 +367,52 @@ fi
 [[ "$(wc -l < "$CURL_LOG" | tr -d ' ')" == 1 ]] \
   || { echo 'prerelease metadata should fail before fetching checksums' >&2; exit 1; }
 mv "$temp_dir/latest-stable.json" "$fixture_dir/latest.json"
+
+
+# Optional summaries preserve the local outcome and expose only a scoped link.
+printf '{"id":"demo-project"}\n' > "$workspace/demo project/datatug-project.json"
+python3 - "$temp_dir" <<'PYFIXTURE'
+import base64,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+reference=base64.urlsafe_b64encode(json.dumps({'v':1,'environment':'ci-prod','summaryId':'A'*43},separators=(',',':')).encode()).decode().rstrip('=')
+link='https://datatug.app/space/space/store/firestore/project/demo-project/overview#check-summary='+reference
+for status,code in [('pass',0),('fail',1)]:
+ result={'schemaVersion':'datatug.checks.run/v1','status':status,'exitCode':code,'checks':[{'index':1,'status':status,'executionStatus':'completed','outcome':status,'severity':'','durationMs':1}],'deepLink':link,'deepLinkReason':'hosted_summary_published'}
+ (root/f'summary-{status}.json').write_text(json.dumps(result))
+ result['deepLink']='';result['deepLinkReason']='summary_publish_denied'
+ (root/f'summary-denied-{status}.json').write_text(json.dumps(result))
+result=json.loads((root/'summary-pass.json').read_text())
+result['deepLink']=link.replace('/space/space/','/space/foreign/')
+(root/'summary-foreign.json').write_text(json.dumps(result))
+result['deepLink']='https://evil.example/secret-marker'
+(root/'summary-evil.json').write_text(json.dumps(result))
+ref=base64.urlsafe_b64encode(json.dumps({'v':1,'environment':'ci-prod','summaryId':'A'*43,'sql':'private-marker'}).encode()).decode().rstrip('=')
+result['deepLink']=link.split('#')[0]+'#check-summary='+ref
+(root/'summary-private-fragment.json').write_text(json.dumps(result))
+PYFIXTURE
+for summary_case in pass fail denied-pass denied-fail; do
+  expected=0
+  [[ "$summary_case" != *fail ]] || expected=1
+  set +e
+  env "${checks_env[@]}" DATATUG_CHECKS=single DATATUG_PUBLISH_SUMMARY=true DATATUG_SUMMARY_SPACE=space \
+    DATATUG_SUMMARY_TOKEN=summary-token-private-marker DATATUG_CHECK_FIXTURE="$temp_dir/summary-$summary_case.json" \
+    DATATUG_CHECK_EXIT="$expected" GITHUB_OUTPUT="$temp_dir/summary-$summary_case.out" \
+    GITHUB_STEP_SUMMARY="$temp_dir/summary-$summary_case.summary" "$script_dir/datatug-cli.sh" checks
+  actual=$?
+  set -e
+  [[ "$actual" == "$expected" ]] || { echo 'Summary publication changed local outcome' >&2; exit 1; }
+done
+grep -F 'Open this Check summary in DataTug.app' "$temp_dir/summary-pass.summary" >/dev/null
+grep -F 'local Check outcome above is unchanged' "$temp_dir/summary-denied-fail.summary" >/dev/null
+grep -Fx -- '--summary-token-env' "$check_args_log" >/dev/null
+if grep -F 'summary-token-private-marker' "$check_args_log" "$temp_dir"/summary-*.out "$temp_dir"/summary-*.summary >/dev/null; then
+  echo 'Summary credential leaked into arguments or outputs' >&2; exit 1
+fi
+for bad in foreign evil private-fragment; do
+  expect_check_failure "summary-$bad" error 4 DATATUG_CHECKS=single DATATUG_PUBLISH_SUMMARY=true \
+    DATATUG_SUMMARY_SPACE=space DATATUG_CHECK_FIXTURE="$temp_dir/summary-$bad.json"
+done
+expect_check_failure summary-no-consent error 4 DATATUG_CHECKS=single DATATUG_CHECK_FIXTURE="$temp_dir/summary-pass.json"
+expect_check_failure invalid-publish configuration_error 2 DATATUG_PUBLISH_SUMMARY=yes
 
 echo 'DataTug CLI resolver, cache-key inputs, checksum verification, install, and safe project path tests passed.'
