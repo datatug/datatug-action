@@ -20,6 +20,20 @@ case "${1:-}" in
   validate)
     printf '%s\n' "${2:?expected validate directory argument}" > "$DATATUG_VALIDATION_LOG"
     ;;
+  checks)
+    printf '%s\n' "$@" >> "$DATATUG_CHECK_ARGS_LOG"
+    printf '%s|%s\n' "${DATATUG_TELEMETRY:-unset}" "${DATATUG_CLIENT+x}" >> "$DATATUG_CHECK_ENV_LOG"
+    trap '[[ -n "${DATATUG_TERM_MARKER:-}" ]] && touch "$DATATUG_TERM_MARKER"; exit 143' TERM
+    if [[ "${DATATUG_CHECK_FIXTURE:-}" == hang-after-stdout ]]; then
+      cat "$DATATUG_CHECK_HANG_FIXTURE"
+      exec 1>&-
+      sleep 3
+      exit 0
+    fi
+    if [[ "${DATATUG_CHECK_FIXTURE:-}" == timeout ]]; then sleep 3; fi
+    cat "$DATATUG_CHECK_FIXTURE"
+    exit "${DATATUG_CHECK_EXIT:-0}"
+    ;;
   *)
     exit 64
     ;;
@@ -74,7 +88,8 @@ while (($#)); do
   esac
 done
 [[ -n "$output" && -n "$url" ]] || exit 65
-if [[ "$url" == https://api.github.com/repos/datatug/datatug/releases/latest ]]; then
+if [[ "$url" == https://api.github.com/repos/datatug/datatug/releases/latest || \
+      "$url" == https://api.github.com/repos/datatug/datatug/releases/tags/v1.2.3 ]]; then
   [[ "$auth_header" == 1 ]] || exit 66
   printf 'api\n' >> "$CURL_LOG"
   cp "$FIXTURE_DIR/latest.json" "$output"
@@ -110,6 +125,10 @@ reject_before_network() {
 }
 
 reject_before_network
+if DATATUG_MODE=checks-v2 "$script_dir/datatug-cli.sh" mode >/dev/null 2>&1; then
+  echo 'invalid operation mode unexpectedly passed' >&2
+  exit 1
+fi
 
 release_output="$temp_dir/release-linux.out"
 : > "$CURL_LOG"
@@ -121,6 +140,21 @@ grep -Fx 'archive=datatug_1.2.3_linux_amd64.tar.gz' "$release_output" >/dev/null
 grep -Fx "sha256=$archive_sha" "$release_output" >/dev/null
 grep -Fx "cache-key=datatug-cli-v1.2.3-Linux-X64-$archive_sha" "$release_output" >/dev/null
 [[ "$(wc -l < "$CURL_LOG" | tr -d ' ')" == 2 ]] || { echo 'release resolution must make one API and one checksum request' >&2; exit 1; }
+
+: > "$CURL_LOG"
+release_output="$temp_dir/release-pinned.out"
+RUNNER_OS=Linux RUNNER_ARCH=X64 DATATUG_CLI_VERSION=1.2.3 GITHUB_OUTPUT="$release_output" \
+  "$script_dir/datatug-cli.sh" resolve
+grep -Fx 'version=1.2.3' "$release_output" >/dev/null
+[[ "$(head -n 1 "$CURL_LOG")" == api ]] || { echo 'pinned version did not resolve from release metadata' >&2; exit 1; }
+
+: > "$CURL_LOG"
+if RUNNER_OS=Linux RUNNER_ARCH=X64 DATATUG_CLI_VERSION='1.2.3;touch /tmp/bad' GITHUB_OUTPUT="$temp_dir/bad-version.out" \
+  "$script_dir/datatug-cli.sh" resolve >"$temp_dir/bad-version.stdout" 2>"$temp_dir/bad-version.stderr"; then
+  echo 'invalid CLI version unexpectedly resolved' >&2
+  exit 1
+fi
+[[ ! -s "$CURL_LOG" ]] || { echo 'invalid CLI version reached network' >&2; exit 1; }
 
 archive_name='datatug_1.2.3_linux_amd64.tar.gz'
 archive_path="$RUNNER_TEMP/datatug-cli-cache/$archive_name"
@@ -154,6 +188,167 @@ DATATUG_CLI="$cli_path" DATATUG_PROJECT_DIR='demo project' \
 [[ "$(cat "$validation_log")" == "-d=$resolved_workspace/demo project" ]] \
   || { printf 'CLI validation received unexpected argument: %s\n' "$(cat "$validation_log")" >&2; exit 1; }
 
+check_fixture="$temp_dir/check-result.json"
+cat > "$check_fixture" <<'JSON'
+{"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"checks":[{"index":1,"status":"pass","executionStatus":"completed","outcome":"pass","severity":"","durationMs":12},{"index":2,"status":"pass","executionStatus":"completed","outcome":"pass","severity":"","durationMs":8}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}
+JSON
+check_args_log="$temp_dir/check-args.log"
+export DATATUG_CHECK_FIXTURE="$check_fixture" DATATUG_CHECK_ARGS_LOG="$check_args_log"
+checks_output="$temp_dir/checks.out"
+checks_summary="$temp_dir/checks.summary"
+checks_env=(DATATUG_CLI="$cli_path" DATATUG_PROJECT_DIR='demo project' DATATUG_ENVIRONMENT=ci-prod \
+  DATATUG_CHECKS=$'invoice.reconcile\nchecks.run' DATATUG_LOCAL_OWNER=true DATATUG_TIMEOUT=30s \
+  DATATUG_WARNINGS=fail DATATUG_ENDPOINT= GITHUB_WORKSPACE="$workspace" RUNNER_TEMP="$RUNNER_TEMP" \
+  DATATUG_CHECK_ARGS_LOG="$check_args_log" DATATUG_CHECK_ENV_LOG="$temp_dir/check-env.log" \
+  DATATUG_TERM_MARKER="$temp_dir/term-received" \
+  GITHUB_OUTPUT="$checks_output" GITHUB_STEP_SUMMARY="$checks_summary")
+env "${checks_env[@]}" "$script_dir/datatug-cli.sh" checks
+grep -Fx 'status=pass' "$checks_output" >/dev/null
+grep -F 'invoice.reconcile' "$check_args_log" >/dev/null
+grep -Fx -- '--env' "$check_args_log" >/dev/null
+grep -Fx 'ci-prod' "$check_args_log" >/dev/null
+grep -Fx -- '--local-owner' "$check_args_log" >/dev/null
+grep -Fx -- '--timeout' "$check_args_log" >/dev/null
+grep -Fx '30s' "$check_args_log" >/dev/null
+grep -Fx -- '--warnings' "$check_args_log" >/dev/null
+grep -Fx -- '--format' "$check_args_log" >/dev/null
+grep -Fx '0|x' "$temp_dir/check-env.log" >/dev/null
+grep -F 'hosted_result_reference_unsupported' "$checks_output" >/dev/null
+grep -F 'No summary was uploaded' "$checks_summary" >/dev/null
+
+expect_check_failure() {
+  local name="$1" status="$2" code="$3"; shift 3
+  local output="$temp_dir/$name.out" summary="$temp_dir/$name.summary"
+  set +e
+  env "${checks_env[@]}" "$@" GITHUB_OUTPUT="$output" GITHUB_STEP_SUMMARY="$summary" \
+    "$script_dir/datatug-cli.sh" checks >"$temp_dir/$name.stdout" 2>"$temp_dir/$name.stderr"
+  local actual=$?
+  set -e
+  [[ "$actual" == "$code" ]] || { echo "$name exited $actual, expected $code" >&2; exit 1; }
+  grep -Fx "status=$status" "$output" >/dev/null
+  grep -Fx "exit-code=$code" "$output" >/dev/null
+  local expected_json
+  expected_json="$(printf '{"schemaVersion":"datatug.checks.run/v1","status":"%s","exitCode":%s,"checks":[],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}' "$status" "$code")"
+  grep -Fx "result-json=$expected_json" "$output" >/dev/null
+  grep -F 'DataTug Checks:' "$summary" >/dev/null
+  grep -F "$status" "$summary" >/dev/null
+}
+expect_check_failure missing-consent access_denied 5 DATATUG_LOCAL_OWNER=false
+expect_check_failure unsupported-endpoint configuration_error 2 DATATUG_ENDPOINT='https://example.test'
+grep -F 'The configured execution endpoint is not supported' "$temp_dir/unsupported-endpoint.summary" >/dev/null
+if grep -F 'https://example.test' "$temp_dir/unsupported-endpoint.summary" "$temp_dir/unsupported-endpoint.stdout" \
+  "$temp_dir/unsupported-endpoint.stderr" >/dev/null; then
+  echo 'unsupported endpoint input leaked into action-visible output' >&2
+  exit 1
+fi
+expect_check_failure invalid-env configuration_error 2 DATATUG_ENVIRONMENT='prod\n::warning::inject'
+expect_check_failure invalid-check configuration_error 2 DATATUG_CHECKS='ok;touch /tmp/datatug-action-injected'
+expect_check_failure invalid-timeout configuration_error 2 DATATUG_TIMEOUT=forever
+expect_check_failure invalid-long-timeout configuration_error 2 DATATUG_TIMEOUT=61m
+expect_check_failure invalid-zero-timeout configuration_error 2 DATATUG_TIMEOUT=0s
+expect_check_failure invalid-warnings configuration_error 2 DATATUG_WARNINGS=maybe
+expect_check_failure no-checks configuration_error 2 DATATUG_CHECKS='  '
+expect_check_failure duplicate-check configuration_error 2 DATATUG_CHECKS=$'same\nsame'
+ln -s "$temp_dir" "$workspace/escape"
+many_checks="$(python3 -c 'print(chr(10).join("check%d" % i for i in range(101)))')"
+expect_check_failure too-many-checks configuration_error 2 DATATUG_CHECKS="$many_checks"
+expect_check_failure escaping-project configuration_error 2 DATATUG_PROJECT_DIR=escape
+expect_check_failure cli-spawn-error error 4 DATATUG_CLI="$temp_dir/not-an-executable"
+[[ ! -e /tmp/datatug-action-injected ]] || { echo 'Check input escaped argv boundary' >&2; exit 1; }
+
+cat > "$temp_dir/malicious.json" <<'JSON'
+{"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"checks":[{"index":1,"status":"pass\n::warning::secret","executionStatus":"completed","outcome":"pass","severity":"","durationMs":1}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported","secret":"never-print-me"}
+JSON
+expect_check_failure malicious-child error 4 DATATUG_CHECK_FIXTURE="$temp_dir/malicious.json"
+if grep -R 'never-print-me\|secret' "$temp_dir/malicious-child.stdout" "$temp_dir/malicious-child.stderr" \
+  "$temp_dir/malicious-child.out" "$temp_dir/malicious-child.summary" >/dev/null; then
+  echo 'child output or error leaked into action-visible output' >&2
+  exit 1
+fi
+
+cat > "$temp_dir/extra-field.json" <<'JSON'
+{"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"checks":[{"index":1,"status":"pass","executionStatus":"completed","outcome":"pass","severity":"","durationMs":1,"privateNested":{"token":"never-print-this-field"}}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported","privateExtra":"never-print-this-field"}
+JSON
+env "${checks_env[@]}" DATATUG_CHECK_FIXTURE="$temp_dir/extra-field.json" DATATUG_CHECKS=single \
+  GITHUB_OUTPUT="$temp_dir/extra-field.out" \
+  GITHUB_STEP_SUMMARY="$temp_dir/extra-field.summary" "$script_dir/datatug-cli.sh" checks
+if grep -R 'never-print-this-field' "$temp_dir/extra-field.out" "$temp_dir/extra-field.summary" >/dev/null; then
+  echo 'unknown top-level or nested child JSON field leaked into action output' >&2
+  exit 1
+fi
+
+printf '{"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"secret":"malformed-private-token-42"' \
+  > "$temp_dir/malformed-secret.json"
+expect_check_failure malformed-json error 4 DATATUG_CHECK_FIXTURE="$temp_dir/malformed-secret.json"
+if grep -R 'malformed-private-token-42' "$temp_dir/malformed-json.stdout" "$temp_dir/malformed-json.stderr" \
+  "$temp_dir/malformed-json.out" "$temp_dir/malformed-json.summary" >/dev/null; then
+  echo 'JSON parser diagnostics leaked malformed child output' >&2
+  exit 1
+fi
+
+env "${checks_env[@]}" GITHUB_OUTPUT="$temp_dir/checks-rerun.out" \
+  GITHUB_STEP_SUMMARY="$temp_dir/checks-rerun.summary" "$script_dir/datatug-cli.sh" checks
+evidence_arg_lines=()
+while IFS= read -r line; do evidence_arg_lines+=("$line"); done \
+  < <(grep -n -- '--evidence-dir' "$check_args_log" | cut -d: -f1)
+[[ "${#evidence_arg_lines[@]}" == 5 ]] || { echo 'expected evidence paths for all valid CLI invocations' >&2; exit 1; }
+first_evidence="$(sed -n "$((evidence_arg_lines[0] + 1))p" "$check_args_log")"
+second_evidence="$(sed -n "$((evidence_arg_lines[4] + 1))p" "$check_args_log")"
+[[ "$first_evidence" != "$second_evidence" ]] \
+  || { echo 'rerun reused the prior evidence directory' >&2; exit 1; }
+
+run_status_case() {
+  local case_name="$1" status="$2" code="$3" expected_process="$4"
+  local warning_policy=fail
+  [[ "$case_name" == check-warning-ignored ]] && warning_policy=ignore
+  cat > "$temp_dir/$case_name.json" <<JSON
+{"schemaVersion":"datatug.checks.run/v1","status":"$status","exitCode":$code,"checks":[{"index":1,"status":"$status","executionStatus":"completed","outcome":"$([[ "$status" == pass ]] && printf pass || printf fail)","severity":"","durationMs":1}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}
+JSON
+  set +e
+  env "${checks_env[@]}" DATATUG_CHECKS=single DATATUG_CHECK_FIXTURE="$temp_dir/$case_name.json" DATATUG_CHECK_EXIT="$code" \
+    DATATUG_WARNINGS="$warning_policy" \
+    GITHUB_OUTPUT="$temp_dir/$case_name.out" GITHUB_STEP_SUMMARY="$temp_dir/$case_name.summary" \
+    "$script_dir/datatug-cli.sh" checks >"$temp_dir/$case_name.stdout" 2>"$temp_dir/$case_name.stderr"
+  local actual=$?
+  set -e
+  [[ "$actual" == "$expected_process" ]] || { echo "$case_name exited $actual, expected $expected_process" >&2; exit 1; }
+  grep -Fx "status=$status" "$temp_dir/$case_name.out" >/dev/null
+  grep -Fx "exit-code=$code" "$temp_dir/$case_name.out" >/dev/null
+  local outcome=fail
+  [[ "$status" == pass ]] && outcome=pass
+  local expected_json
+  expected_json="$(printf '{"schemaVersion":"datatug.checks.run/v1","status":"%s","exitCode":%s,"checks":[{"index":1,"status":"%s","executionStatus":"completed","outcome":"%s","severity":"","durationMs":1}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}' "$status" "$code" "$status" "$outcome")"
+  grep -Fx "result-json=$expected_json" "$temp_dir/$case_name.out" >/dev/null
+}
+run_status_case check-fail fail 1 1
+run_status_case check-unknown unknown 1 1
+run_status_case check-warning warning 1 1
+run_status_case check-warning-ignored warning 0 0
+run_status_case check-config configuration_error 2 2
+run_status_case check-not-found not_found 3 3
+run_status_case check-error error 4 4
+run_status_case check-denied access_denied 5 5
+run_status_case check-cancelled cancelled 130 130
+
+expect_check_failure check-timeout timeout 124 DATATUG_CHECK_FIXTURE=timeout DATATUG_TIMEOUT=1s
+[[ -e "$temp_dir/term-received" ]] || { echo 'timeout did not give the CLI process group a SIGTERM cleanup opportunity' >&2; exit 1; }
+
+rm -f "$temp_dir/term-received"
+expect_check_failure check-timeout-after-eof timeout 124 \
+  DATATUG_CHECK_FIXTURE=hang-after-stdout DATATUG_CHECK_HANG_FIXTURE="$check_fixture" DATATUG_TIMEOUT=1s
+
+if env "${checks_env[@]}" DATATUG_TIMEOUT=60m GITHUB_OUTPUT="$temp_dir/max-timeout.out" \
+  GITHUB_STEP_SUMMARY="$temp_dir/max-timeout.summary" "$script_dir/datatug-cli.sh" checks \
+  >"$temp_dir/max-timeout.stdout" 2>"$temp_dir/max-timeout.stderr"; then
+  grep -Fx 'status=pass' "$temp_dir/max-timeout.out" >/dev/null
+else
+  echo 'maximum supported timeout unexpectedly failed' >&2
+  exit 1
+fi
+
+python3 -c 'import sys; sys.stdout.buffer.write(b"x" * (1024 * 1024 + 1))' > "$temp_dir/oversized.json"
+expect_check_failure oversized-output error 4 DATATUG_CHECK_FIXTURE="$temp_dir/oversized.json"
+
 release_output="$temp_dir/release-macos.out"
 RUNNER_OS=macOS RUNNER_ARCH=ARM64 GITHUB_OUTPUT="$release_output" \
   "$script_dir/datatug-cli.sh" resolve
@@ -172,5 +367,52 @@ fi
 [[ "$(wc -l < "$CURL_LOG" | tr -d ' ')" == 1 ]] \
   || { echo 'prerelease metadata should fail before fetching checksums' >&2; exit 1; }
 mv "$temp_dir/latest-stable.json" "$fixture_dir/latest.json"
+
+
+# Optional summaries preserve the local outcome and expose only a scoped link.
+printf '{"id":"demo-project"}\n' > "$workspace/demo project/datatug-project.json"
+python3 - "$temp_dir" <<'PYFIXTURE'
+import base64,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+reference=base64.urlsafe_b64encode(json.dumps({'v':1,'environment':'ci-prod','summaryId':'A'*43},separators=(',',':')).encode()).decode().rstrip('=')
+link='https://datatug.app/space/space/store/firestore/project/demo-project/overview#check-summary='+reference
+for status,code in [('pass',0),('fail',1)]:
+ result={'schemaVersion':'datatug.checks.run/v1','status':status,'exitCode':code,'checks':[{'index':1,'status':status,'executionStatus':'completed','outcome':status,'severity':'','durationMs':1}],'deepLink':link,'deepLinkReason':'hosted_summary_published'}
+ (root/f'summary-{status}.json').write_text(json.dumps(result))
+ result['deepLink']='';result['deepLinkReason']='summary_publish_denied'
+ (root/f'summary-denied-{status}.json').write_text(json.dumps(result))
+result=json.loads((root/'summary-pass.json').read_text())
+result['deepLink']=link.replace('/space/space/','/space/foreign/')
+(root/'summary-foreign.json').write_text(json.dumps(result))
+result['deepLink']='https://evil.example/secret-marker'
+(root/'summary-evil.json').write_text(json.dumps(result))
+ref=base64.urlsafe_b64encode(json.dumps({'v':1,'environment':'ci-prod','summaryId':'A'*43,'sql':'private-marker'}).encode()).decode().rstrip('=')
+result['deepLink']=link.split('#')[0]+'#check-summary='+ref
+(root/'summary-private-fragment.json').write_text(json.dumps(result))
+PYFIXTURE
+for summary_case in pass fail denied-pass denied-fail; do
+  expected=0
+  [[ "$summary_case" != *fail ]] || expected=1
+  set +e
+  env "${checks_env[@]}" DATATUG_CHECKS=single DATATUG_PUBLISH_SUMMARY=true DATATUG_SUMMARY_SPACE=space \
+    DATATUG_SUMMARY_TOKEN=summary-token-private-marker DATATUG_CHECK_FIXTURE="$temp_dir/summary-$summary_case.json" \
+    DATATUG_CHECK_EXIT="$expected" GITHUB_OUTPUT="$temp_dir/summary-$summary_case.out" \
+    GITHUB_STEP_SUMMARY="$temp_dir/summary-$summary_case.summary" "$script_dir/datatug-cli.sh" checks
+  actual=$?
+  set -e
+  [[ "$actual" == "$expected" ]] || { echo 'Summary publication changed local outcome' >&2; exit 1; }
+done
+grep -F 'Open this Check summary in DataTug.app' "$temp_dir/summary-pass.summary" >/dev/null
+grep -F 'local Check outcome above is unchanged' "$temp_dir/summary-denied-fail.summary" >/dev/null
+grep -Fx -- '--summary-token-env' "$check_args_log" >/dev/null
+if grep -F 'summary-token-private-marker' "$check_args_log" "$temp_dir"/summary-*.out "$temp_dir"/summary-*.summary >/dev/null; then
+  echo 'Summary credential leaked into arguments or outputs' >&2; exit 1
+fi
+for bad in foreign evil private-fragment; do
+  expect_check_failure "summary-$bad" error 4 DATATUG_CHECKS=single DATATUG_PUBLISH_SUMMARY=true \
+    DATATUG_SUMMARY_SPACE=space DATATUG_CHECK_FIXTURE="$temp_dir/summary-$bad.json"
+done
+expect_check_failure summary-no-consent error 4 DATATUG_CHECKS=single DATATUG_CHECK_FIXTURE="$temp_dir/summary-pass.json"
+expect_check_failure invalid-publish configuration_error 2 DATATUG_PUBLISH_SUMMARY=yes
 
 echo 'DataTug CLI resolver, cache-key inputs, checksum verification, install, and safe project path tests passed.'
