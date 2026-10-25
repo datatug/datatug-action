@@ -167,62 +167,97 @@ validate_project() {
   "$DATATUG_CLI" validate "-d=${project_dir}"
 }
 
+checks_fail() {
+  local status="$1" code="$2" reason="${3:-generic}" summary_message
+  case "$status" in
+    access_denied) summary_message='Checks were not run because explicit local-owner consent is required.' ;;
+    configuration_error)
+      case "$reason" in
+        unsupported_endpoint) summary_message='The configured execution endpoint is not supported by this Action version.' ;;
+        *) summary_message='Checks could not be configured; review the Action inputs and project path.' ;;
+      esac
+      ;;
+    error) summary_message='The DataTug CLI did not return a valid safe result.' ;;
+    *) status=error; code=4; summary_message='The DataTug CLI did not return a valid safe result.' ;;
+  esac
+  local result_json
+  result_json="$(printf '{"schemaVersion":"datatug.checks.run/v1","status":"%s","exitCode":%s,"checks":[],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}\n' "$status" "$code")"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      printf 'status=%s\n' "$status"
+      printf 'exit-code=%s\n' "$code"
+      printf 'result-json=%s\n' "$result_json"
+    } >> "$GITHUB_OUTPUT"
+  fi
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      # shellcheck disable=SC2016 # Backticks are Markdown code delimiters, not shell substitutions.
+      printf '## DataTug Checks: `%s`\n\n%s\n' "$status" "$summary_message"
+      printf '\nHosted result references are not supported for private CI evidence. [Open DataTug.app](https://datatug.app)\n'
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  printf 'datatug-action: %s\n' "$summary_message" >&2
+  exit "$code"
+}
+
 resolve_project_dir() {
-  : "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
+  [[ -n "${GITHUB_WORKSPACE:-}" ]] || checks_fail configuration_error 2
   local workspace project_dir
-  workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+  workspace="$(cd "$GITHUB_WORKSPACE" 2>/dev/null && pwd -P)" \
+    || checks_fail configuration_error 2
   if [[ -z "${DATATUG_PROJECT_DIR:-}" ]]; then
     project_dir="$workspace"
   else
-    [[ "$DATATUG_PROJECT_DIR" != /* ]] || die 'project directory must be relative to GITHUB_WORKSPACE'
-    project_dir="$(cd "$workspace/$DATATUG_PROJECT_DIR" && pwd -P)" \
-      || die 'project directory does not exist'
+    [[ "$DATATUG_PROJECT_DIR" != /* ]] || checks_fail configuration_error 2
+    project_dir="$(cd "$workspace/$DATATUG_PROJECT_DIR" 2>/dev/null && pwd -P)" \
+      || checks_fail configuration_error 2
   fi
   case "$project_dir" in
     "$workspace"|"$workspace"/*) ;;
-    *) die 'project directory resolves outside GITHUB_WORKSPACE' ;;
+    *) checks_fail configuration_error 2 ;;
   esac
   printf '%s\n' "$project_dir"
 }
 
 check_run() (
-  : "${DATATUG_CLI:?DATATUG_CLI is required}"
   : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
   : "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is required}"
-  : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-  [[ "${DATATUG_LOCAL_OWNER:-}" == true ]] || die 'checks mode requires explicit local-owner consent'
-  [[ -z "${DATATUG_ENDPOINT:-}" ]] || die 'execution endpoint is not supported by this Action version'
+  [[ -n "${DATATUG_CLI:-}" ]] || checks_fail error 4
+  [[ -n "${RUNNER_TEMP:-}" ]] || checks_fail configuration_error 2
+  [[ "${DATATUG_LOCAL_OWNER:-}" == true ]] || checks_fail access_denied 5
+  [[ -z "${DATATUG_ENDPOINT:-}" ]] || checks_fail configuration_error 2 unsupported_endpoint
   [[ "${DATATUG_ENVIRONMENT:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
-    || die 'environment must be a name containing letters, digits, dot, underscore, or hyphen'
+    || checks_fail configuration_error 2
   [[ "${DATATUG_TIMEOUT:-}" =~ ^(0|[1-9][0-9]{0,3})(s|m)$ ]] \
-    || die 'timeout must be from 1s through 3600s or 1m through 60m'
+    || checks_fail configuration_error 2
   local timeout_value="${BASH_REMATCH[1]}" timeout_unit="${BASH_REMATCH[2]}" timeout_seconds
   timeout_seconds="$timeout_value"
   [[ "$timeout_unit" == s ]] || timeout_seconds=$((timeout_value * 60))
   if ((timeout_seconds < 1 || timeout_seconds > 3600)); then
-    die 'timeout must be from 1s through 3600s or 1m through 60m'
+    checks_fail configuration_error 2
   fi
   [[ "${DATATUG_WARNINGS:-}" == fail || "${DATATUG_WARNINGS:-}" == ignore ]] \
-    || die 'warnings must be fail or ignore'
-  [[ -n "${DATATUG_CHECKS:-}" ]] || die 'at least one named Check is required'
+    || checks_fail configuration_error 2
+  [[ -n "${DATATUG_CHECKS:-}" ]] || checks_fail configuration_error 2
 
   local project_dir evidence_dir raw_file safe_file cli_status item check_count=0 seen_checks=' '
   project_dir="$(resolve_project_dir)"
-  evidence_dir="$(mktemp -d "${RUNNER_TEMP%/}/datatug-evidence.XXXXXXXX")"
-  chmod 700 "$evidence_dir"
-  raw_file="$evidence_dir/child-output.json"
-  safe_file="$evidence_dir/result.json"
   local -a args=(checks run --project "$project_dir" --env "$DATATUG_ENVIRONMENT")
   while IFS= read -r item || [[ -n "$item" ]]; do
     [[ -n "$item" ]] || continue
-    [[ "$item" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || die 'Check IDs must be simple named identifiers'
-    [[ "$seen_checks" != *" $item "* ]] || die 'duplicate Check IDs are not allowed'
+    [[ "$item" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || checks_fail configuration_error 2
+    [[ "$seen_checks" != *" $item "* ]] || checks_fail configuration_error 2
     seen_checks+="$item "
     check_count=$((check_count + 1))
-    ((check_count <= 100)) || die 'no more than 100 Checks may be run in one Action invocation'
+    ((check_count <= 100)) || checks_fail configuration_error 2
     args+=(--check "$item")
   done <<< "$DATATUG_CHECKS"
-  [[ "${#args[@]}" -gt 7 ]] || die 'at least one named Check is required'
+  ((check_count > 0)) || checks_fail configuration_error 2
+  evidence_dir="$(mktemp -d "${RUNNER_TEMP%/}/datatug-evidence.XXXXXXXX" 2>/dev/null)" \
+    || checks_fail configuration_error 2
+  chmod 700 "$evidence_dir" 2>/dev/null || checks_fail configuration_error 2
+  raw_file="$evidence_dir/child-output.json"
+  safe_file="$evidence_dir/result.json"
   args+=(--local-owner --evidence-dir "$evidence_dir" --timeout "$DATATUG_TIMEOUT" --warnings "$DATATUG_WARNINGS" --format json)
 
   set +e
@@ -308,6 +343,16 @@ except Cancelled:
     with open(output, "w", encoding="utf-8") as stream:
         stream.write(safe_prefix % ("cancelled", 130))
     raise SystemExit(130)
+except OSError:
+    stop_process()
+    with open(output, "w", encoding="utf-8") as stream:
+        stream.write(safe_prefix % ("error", 4))
+    raise SystemExit(4)
+except Exception:
+    stop_process()
+    with open(output, "w", encoding="utf-8") as stream:
+        stream.write(safe_prefix % ("error", 4))
+    raise SystemExit(4)
 with open(output, "wb") as stream:
     stream.write(captured)
 raise SystemExit(child_status)
@@ -331,9 +376,9 @@ PY
       (.durationMs | type == "number" and . >= 0)
     )) and
     .deepLink == "https://datatug.app" and .deepLinkReason == "hosted_result_reference_unsupported"
-  ' "$raw_file" >/dev/null 2>/dev/null || die 'CLI returned an invalid or inconsistent safe result envelope'
+  ' "$raw_file" >/dev/null 2>/dev/null || checks_fail error 4
   jq -c '{schemaVersion,status,exitCode,checks:[.checks[] | {index,status,executionStatus,outcome,severity,durationMs}],deepLink,deepLinkReason}' \
-    "$raw_file" > "$safe_file" 2>/dev/null || die 'CLI returned an invalid or inconsistent safe result envelope'
+    "$raw_file" > "$safe_file" 2>/dev/null || checks_fail error 4
   chmod 600 "$raw_file" "$safe_file"
 
   local status exit_code

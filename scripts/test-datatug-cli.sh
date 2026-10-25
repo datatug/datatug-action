@@ -216,42 +216,52 @@ grep -Fx '0|x' "$temp_dir/check-env.log" >/dev/null
 grep -F 'hosted_result_reference_unsupported' "$checks_output" >/dev/null
 grep -F 'Hosted result references are not supported' "$checks_summary" >/dev/null
 
-for bad_case in missing-consent unsupported-endpoint invalid-check invalid-timeout invalid-long-timeout invalid-zero-timeout duplicate-check; do
-  case "$bad_case" in
-    missing-consent) override=(DATATUG_LOCAL_OWNER=false) ;;
-    unsupported-endpoint) override=(DATATUG_ENDPOINT='https://example.test') ;;
-    invalid-check) override=(DATATUG_CHECKS='ok;touch /tmp/datatug-action-injected') ;;
-    invalid-timeout) override=(DATATUG_TIMEOUT=forever) ;;
-    invalid-long-timeout) override=(DATATUG_TIMEOUT=61m) ;;
-    invalid-zero-timeout) override=(DATATUG_TIMEOUT=0s) ;;
-    duplicate-check) override=(DATATUG_CHECKS=$'same\nsame') ;;
-  esac
-  if env "${checks_env[@]}" "${override[@]}" GITHUB_OUTPUT="$temp_dir/$bad_case.out" \
-    GITHUB_STEP_SUMMARY="$temp_dir/$bad_case.summary" "$script_dir/datatug-cli.sh" checks \
-    >"$temp_dir/$bad_case.stdout" 2>"$temp_dir/$bad_case.stderr"; then
-    echo "$bad_case unexpectedly succeeded" >&2
-    exit 1
-  fi
-done
-many_checks="$(python3 -c 'print(chr(10).join("check%d" % i for i in range(101)))')"
-if env "${checks_env[@]}" DATATUG_CHECKS="$many_checks" GITHUB_OUTPUT="$temp_dir/too-many.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/too-many.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/too-many.stdout" 2>"$temp_dir/too-many.stderr"; then
-  echo 'more than 100 Check IDs unexpectedly succeeded' >&2
+expect_check_failure() {
+  local name="$1" status="$2" code="$3"; shift 3
+  local output="$temp_dir/$name.out" summary="$temp_dir/$name.summary"
+  set +e
+  env "${checks_env[@]}" "$@" GITHUB_OUTPUT="$output" GITHUB_STEP_SUMMARY="$summary" \
+    "$script_dir/datatug-cli.sh" checks >"$temp_dir/$name.stdout" 2>"$temp_dir/$name.stderr"
+  local actual=$?
+  set -e
+  [[ "$actual" == "$code" ]] || { echo "$name exited $actual, expected $code" >&2; exit 1; }
+  grep -Fx "status=$status" "$output" >/dev/null
+  grep -Fx "exit-code=$code" "$output" >/dev/null
+  local expected_json
+  expected_json="$(printf '{"schemaVersion":"datatug.checks.run/v1","status":"%s","exitCode":%s,"checks":[],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}' "$status" "$code")"
+  grep -Fx "result-json=$expected_json" "$output" >/dev/null
+  grep -F 'DataTug Checks:' "$summary" >/dev/null
+  grep -F "$status" "$summary" >/dev/null
+}
+expect_check_failure missing-consent access_denied 5 DATATUG_LOCAL_OWNER=false
+expect_check_failure unsupported-endpoint configuration_error 2 DATATUG_ENDPOINT='https://example.test'
+grep -F 'The configured execution endpoint is not supported' "$temp_dir/unsupported-endpoint.summary" >/dev/null
+if grep -F 'https://example.test' "$temp_dir/unsupported-endpoint.summary" "$temp_dir/unsupported-endpoint.stdout" \
+  "$temp_dir/unsupported-endpoint.stderr" >/dev/null; then
+  echo 'unsupported endpoint input leaked into action-visible output' >&2
   exit 1
 fi
+expect_check_failure invalid-env configuration_error 2 DATATUG_ENVIRONMENT='prod\n::warning::inject'
+expect_check_failure invalid-check configuration_error 2 DATATUG_CHECKS='ok;touch /tmp/datatug-action-injected'
+expect_check_failure invalid-timeout configuration_error 2 DATATUG_TIMEOUT=forever
+expect_check_failure invalid-long-timeout configuration_error 2 DATATUG_TIMEOUT=61m
+expect_check_failure invalid-zero-timeout configuration_error 2 DATATUG_TIMEOUT=0s
+expect_check_failure invalid-warnings configuration_error 2 DATATUG_WARNINGS=maybe
+expect_check_failure no-checks configuration_error 2 DATATUG_CHECKS='  '
+expect_check_failure duplicate-check configuration_error 2 DATATUG_CHECKS=$'same\nsame'
+ln -s "$temp_dir" "$workspace/escape"
+many_checks="$(python3 -c 'print(chr(10).join("check%d" % i for i in range(101)))')"
+expect_check_failure too-many-checks configuration_error 2 DATATUG_CHECKS="$many_checks"
+expect_check_failure escaping-project configuration_error 2 DATATUG_PROJECT_DIR=escape
+expect_check_failure cli-spawn-error error 4 DATATUG_CLI="$temp_dir/not-an-executable"
 [[ ! -e /tmp/datatug-action-injected ]] || { echo 'Check input escaped argv boundary' >&2; exit 1; }
 
 cat > "$temp_dir/malicious.json" <<'JSON'
 {"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"checks":[{"index":1,"status":"pass\n::warning::secret","executionStatus":"completed","outcome":"pass","severity":"","durationMs":1}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported","secret":"never-print-me"}
 JSON
-if env "${checks_env[@]}" DATATUG_CHECK_FIXTURE="$temp_dir/malicious.json" GITHUB_OUTPUT="$temp_dir/malicious.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/malicious.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/malicious.stdout" 2>"$temp_dir/malicious.stderr"; then
-  echo 'malicious child envelope unexpectedly succeeded' >&2
-  exit 1
-fi
-if grep -R 'never-print-me\|secret' "$temp_dir/malicious.stdout" "$temp_dir/malicious.stderr" >/dev/null; then
+expect_check_failure malicious-child error 4 DATATUG_CHECK_FIXTURE="$temp_dir/malicious.json"
+if grep -R 'never-print-me\|secret' "$temp_dir/malicious-child.stdout" "$temp_dir/malicious-child.stderr" \
+  "$temp_dir/malicious-child.out" "$temp_dir/malicious-child.summary" >/dev/null; then
   echo 'child output or error leaked into action-visible output' >&2
   exit 1
 fi
@@ -269,13 +279,9 @@ fi
 
 printf '{"schemaVersion":"datatug.checks.run/v1","status":"pass","exitCode":0,"secret":"malformed-private-token-42"' \
   > "$temp_dir/malformed-secret.json"
-if env "${checks_env[@]}" DATATUG_CHECK_FIXTURE="$temp_dir/malformed-secret.json" GITHUB_OUTPUT="$temp_dir/malformed-secret.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/malformed-secret.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/malformed-secret.stdout" 2>"$temp_dir/malformed-secret.stderr"; then
-  echo 'malformed CLI JSON unexpectedly succeeded' >&2
-  exit 1
-fi
-if grep -R 'malformed-private-token-42' "$temp_dir/malformed-secret.stdout" "$temp_dir/malformed-secret.stderr" >/dev/null; then
+expect_check_failure malformed-json error 4 DATATUG_CHECK_FIXTURE="$temp_dir/malformed-secret.json"
+if grep -R 'malformed-private-token-42' "$temp_dir/malformed-json.stdout" "$temp_dir/malformed-json.stderr" \
+  "$temp_dir/malformed-json.out" "$temp_dir/malformed-json.summary" >/dev/null; then
   echo 'JSON parser diagnostics leaked malformed child output' >&2
   exit 1
 fi
@@ -307,6 +313,12 @@ JSON
   set -e
   [[ "$actual" == "$expected_process" ]] || { echo "$case_name exited $actual, expected $expected_process" >&2; exit 1; }
   grep -Fx "status=$status" "$temp_dir/$case_name.out" >/dev/null
+  grep -Fx "exit-code=$code" "$temp_dir/$case_name.out" >/dev/null
+  local outcome=fail
+  [[ "$status" == pass ]] && outcome=pass
+  local expected_json
+  expected_json="$(printf '{"schemaVersion":"datatug.checks.run/v1","status":"%s","exitCode":%s,"checks":[{"index":1,"status":"%s","executionStatus":"completed","outcome":"%s","severity":"","durationMs":1}],"deepLink":"https://datatug.app","deepLinkReason":"hosted_result_reference_unsupported"}' "$status" "$code" "$status" "$outcome")"
+  grep -Fx "result-json=$expected_json" "$temp_dir/$case_name.out" >/dev/null
 }
 run_status_case check-fail fail 1 1
 run_status_case check-unknown unknown 1 1
@@ -318,34 +330,12 @@ run_status_case check-error error 4 4
 run_status_case check-denied access_denied 5 5
 run_status_case check-cancelled cancelled 130 130
 
-ln -s "$temp_dir" "$workspace/escape"
-if env "${checks_env[@]}" DATATUG_PROJECT_DIR=escape GITHUB_OUTPUT="$temp_dir/escape.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/escape.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/escape.stdout" 2>"$temp_dir/escape.stderr"; then
-  echo 'project symlink escape unexpectedly succeeded' >&2
-  exit 1
-fi
-
-set +e
-env "${checks_env[@]}" DATATUG_CHECK_FIXTURE=timeout DATATUG_TIMEOUT=1s \
-  GITHUB_OUTPUT="$temp_dir/check-timeout.out" GITHUB_STEP_SUMMARY="$temp_dir/check-timeout.summary" \
-  "$script_dir/datatug-cli.sh" checks >"$temp_dir/check-timeout.stdout" 2>"$temp_dir/check-timeout.stderr"
-timeout_status=$?
-set -e
-[[ "$timeout_status" == 124 ]] || { echo "timeout case exited $timeout_status, expected 124: $(cat "$temp_dir/check-timeout.stderr")" >&2; exit 1; }
-grep -Fx 'status=timeout' "$temp_dir/check-timeout.out" >/dev/null
+expect_check_failure check-timeout timeout 124 DATATUG_CHECK_FIXTURE=timeout DATATUG_TIMEOUT=1s
 [[ -e "$temp_dir/term-received" ]] || { echo 'timeout did not give the CLI process group a SIGTERM cleanup opportunity' >&2; exit 1; }
 
 rm -f "$temp_dir/term-received"
-set +e
-env "${checks_env[@]}" DATATUG_CHECK_FIXTURE=hang-after-stdout DATATUG_CHECK_HANG_FIXTURE="$check_fixture" \
-  DATATUG_TIMEOUT=1s GITHUB_OUTPUT="$temp_dir/check-timeout-after-eof.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/check-timeout-after-eof.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/check-timeout-after-eof.stdout" 2>"$temp_dir/check-timeout-after-eof.stderr"
-after_eof_status=$?
-set -e
-[[ "$after_eof_status" == 124 ]] || { echo "post-EOF timeout exited $after_eof_status, expected 124" >&2; exit 1; }
-grep -Fx 'status=timeout' "$temp_dir/check-timeout-after-eof.out" >/dev/null
+expect_check_failure check-timeout-after-eof timeout 124 \
+  DATATUG_CHECK_FIXTURE=hang-after-stdout DATATUG_CHECK_HANG_FIXTURE="$check_fixture" DATATUG_TIMEOUT=1s
 
 if env "${checks_env[@]}" DATATUG_TIMEOUT=60m GITHUB_OUTPUT="$temp_dir/max-timeout.out" \
   GITHUB_STEP_SUMMARY="$temp_dir/max-timeout.summary" "$script_dir/datatug-cli.sh" checks \
@@ -357,14 +347,7 @@ else
 fi
 
 python3 -c 'import sys; sys.stdout.buffer.write(b"x" * (1024 * 1024 + 1))' > "$temp_dir/oversized.json"
-set +e
-env "${checks_env[@]}" DATATUG_CHECK_FIXTURE="$temp_dir/oversized.json" GITHUB_OUTPUT="$temp_dir/oversized.out" \
-  GITHUB_STEP_SUMMARY="$temp_dir/oversized.summary" "$script_dir/datatug-cli.sh" checks \
-  >"$temp_dir/oversized.stdout" 2>"$temp_dir/oversized.stderr"
-oversized_status=$?
-set -e
-[[ "$oversized_status" == 4 ]] || { echo "oversized output exited $oversized_status, expected 4" >&2; exit 1; }
-grep -Fx 'status=error' "$temp_dir/oversized.out" >/dev/null
+expect_check_failure oversized-output error 4 DATATUG_CHECK_FIXTURE="$temp_dir/oversized.json"
 
 release_output="$temp_dir/release-macos.out"
 RUNNER_OS=macOS RUNNER_ARCH=ARM64 GITHUB_OUTPUT="$release_output" \
