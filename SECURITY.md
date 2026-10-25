@@ -6,8 +6,10 @@ Use a full commit SHA for this Action and a minimal workflow permission block.
 Do not expose database or DataTug credentials to untrusted pull-request
 workflows, forked code, or workflows that check out attacker-controlled
 projects. Put credentials in GitHub Secrets and inject only variables required
-by trusted project configuration. The Action has no secret-valued inputs and
-never places credentials in its CLI argument vector.
+by trusted project configuration. The optional `summary-token` input must come from a GitHub secret; it enters
+only the selected CLI process environment. Credentials never enter CLI arguments.
+Without explicit upload consent, the summary-token variable is removed from the
+child environment.
 
 The current Checks mode is local execution. It requires the explicit
 `local-owner: 'true'` input and passes `--local-owner` to the CLI. This is an
@@ -37,9 +39,20 @@ the runner trust boundary.
 ## Data and links
 
 Check rows, SQL, inputs, credentials, local paths, and raw execution errors are
-not included in the Action summary or result output. Links currently point to
-the DataTug app home because a hosted result reference for private CI evidence
-is not supported. The Action does not upload private evidence to DataTug.app.
+not included in the Action summary or result output. Upload is off by default.
+With explicit `publish-summary` consent, a matching hosted Space/project/Check
+catalog and a token with current permission, only identifiers, Check versions,
+execution time, status, severity and duration are reported to the fixed trusted
+DataTug API. Summaries are client-reported, require sign-in and current scope
+permissions to reopen, and expire from API access after seven days. Physical
+cleanup can be asynchronous. Production upload remains separately gated on
+verified private storage rules and approved cleanup configuration.
+
+The Action accepts only the native DataTug.app overview path for the selected
+Space/project and a strict environment/opaque-reference fragment. Arbitrary URLs,
+foreign scopes and extra fragment data are rejected before Markdown output.
+Publication failure preserves the local Check result and exit code. SQL, rows,
+inputs, definitions, credentials and raw errors are never uploaded.
 
 Report security issues privately to the repository maintainers rather than
 opening a public issue containing credentials or customer data.

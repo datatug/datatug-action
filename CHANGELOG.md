@@ -8,3 +8,6 @@
   explicit local-owner consent, timeout and warning policy controls.
 - Emit only a validated safe result envelope and concise job summary; reject
   unsupported execution endpoints.
+- Add explicit opt-in minimal seven-day hosted summaries, secret environment
+  transport, scope-checked DataTug.app links and separate publication failures
+  that preserve the local Check outcome.
