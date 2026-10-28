@@ -43,7 +43,19 @@ def plan(sha):
     changed = git("diff", "--name-only", "--no-renames", baseline, sha, "--", *RUNTIME_PATHS)
     if not changed:
         return {"tag": None, "reason": "no Action runtime change", "baseline": baseline}
-    messages = git("log", "--format=%B", f"{baseline}..{sha}", "--", *RUNTIME_PATHS)
+    # Path-filtered history can hide merge messages, while --full-history can
+    # include a docs-only merge as a feature. Classify each commit against its
+    # first parent instead, including explicit merge decisions.
+    runtime_messages = []
+    for commit in git("rev-list", f"{baseline}..{sha}").splitlines():
+        parents = git("show", "-s", "--format=%P", commit).split()
+        if parents:
+            paths = git("diff", "--name-only", parents[0], commit, "--", *RUNTIME_PATHS)
+        else:
+            paths = git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit, "--", *RUNTIME_PATHS)
+        if paths:
+            runtime_messages.append(git("show", "-s", "--format=%B", commit))
+    messages = "\n".join(runtime_messages)
     if BREAKING.search(messages):
         raise ValueError("declared breaking change requires an explicit release decision")
     major, minor, patch = version

@@ -22,7 +22,7 @@ class TagPlanTests(unittest.TestCase):
         previous = os.getcwd()
         os.chdir(self.tmp.name)
         self.addCleanup(os.chdir, previous)
-        self.git("init", "-q")
+        self.git("init", "-q", "--initial-branch=main")
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Release fixture")
         self.base = self.commit("action.yml", "initial action", "feat: validator")
@@ -96,6 +96,37 @@ class TagPlanTests(unittest.TestCase):
                 sha = self.commit("action.yml", message, message)
                 with self.assertRaisesRegex(ValueError, "explicit release decision"):
                     tag_plan.plan(sha)
+
+    def merge_runtime(self, message):
+        self.git("checkout", "-qb", "feature")
+        self.commit("action.yml", "changed runtime", "refactor: adjust action interface")
+        self.git("checkout", "-q", "main")
+        self.commit("README.md", "documentation", "docs: explain the action")
+        self.git("merge", "--no-ff", "feature", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def test_feature_on_runtime_merge_increments_minor(self):
+        sha = self.merge_runtime("feat: add optional input")
+        self.assertEqual(tag_plan.plan(sha)["tag"], "v0.1.0")
+
+    def test_docs_merge_feature_does_not_change_runtime_patch_increment(self):
+        self.commit("action.yml", "fixed runtime", "fix: runtime")
+        self.git("checkout", "-qb", "docs", self.base)
+        self.commit("README.md", "new copy", "feat: docs")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "--no-ff", "docs", "-m", "feat: merge documentation")
+        sha = self.git("rev-parse", "HEAD")
+        self.assertEqual(tag_plan.plan(sha)["tag"], "v0.0.2")
+
+    def test_breaking_runtime_merge_requires_explicit_release(self):
+        sha = self.merge_runtime("feat!: remove supported input")
+        with self.assertRaisesRegex(ValueError, "explicit release decision"):
+            tag_plan.plan(sha)
+
+    def test_breaking_footer_on_runtime_merge_requires_explicit_release(self):
+        sha = self.merge_runtime("fix: adjust input\n\nBREAKING CHANGE: removed input")
+        with self.assertRaisesRegex(ValueError, "explicit release decision"):
+            tag_plan.plan(sha)
 
     def test_missing_or_invalid_candidate_refuses(self):
         with self.assertRaises(ValueError):

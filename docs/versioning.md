@@ -14,7 +14,7 @@ interface and release gates. No moving major tag is created by this automation.
 The `Test` workflow's tagging job runs only on a push to this repository's
 `main`, after both the release/cache fixtures and real demo validation succeed.
 Pull requests, forks and manual workflow runs cannot publish tags. Only this
-job receives `contents: write`; checkouts do not persist credentials.
+job receives `contents: write`; its checkout does not persist credentials.
 
 The planner compares the tested commit's tree against the highest exact stable
 version tag. A change to either Action metadata file (`action.yml` or
