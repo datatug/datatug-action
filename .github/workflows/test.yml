@@ -20,6 +20,9 @@ jobs:
       - name: Exercise release metadata, cache key, checksum, install and path handling
         run: scripts/test-datatug-cli.sh
 
+      - name: Exercise automatic tag decisions against isolated Git histories
+        run: python3 scripts/test-action-tag.py
+
   validate-pinned-demo:
     name: Validate demo with the released CLI
     runs-on: ubuntu-latest
@@ -82,3 +85,40 @@ jobs:
           set -euo pipefail
           [[ "$CACHE_HIT" == true ]] || { echo "second action call did not restore the CLI cache" >&2; exit 1; }
           [[ "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unexpected CLI version: $CLI_VERSION" >&2; exit 1; }
+
+  tag-action:
+    name: Tag tested Action changes
+    needs: [release-cache-tests, validate-pinned-demo]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.repository == 'datatug/datatug-action'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: action-version-tags
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the tested commit and version history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # actions/checkout v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag only a tested runtime change
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/action-tag-plan.json"
+          python3 scripts/plan-action-tag.py "$GITHUB_SHA" > "$plan"
+          cat "$plan"
+          tag="$(jq -r '.tag // empty' "$plan")"
+          if [[ -z "$tag" ]]; then
+            echo 'No Action version tag required.'
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA"
