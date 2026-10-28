@@ -4,10 +4,12 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("tag_plan", Path(__file__).with_name("plan-action-tag.py"))
 tag_plan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tag_plan)
