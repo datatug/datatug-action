@@ -44,10 +44,10 @@ jobs:
 Replace `demo-project-1` with your project folder, or omit `dir` to validate the
 repository root. The path must be relative to `GITHUB_WORKSPACE`.
 
-**Want a working example?** Explore the
-[DataTug demo project](https://github.com/datatug/datatug-demo-project) or the
-[Chinook demo](https://github.com/datatug/chinook-demo). Both demos pin an exact
-Action version so cloned workflows do not follow changes to `main`. If your
+**Want a working example?** Explore the maintained
+[DataTug demo project](https://github.com/datatug/datatug-demo-project), which pins
+an exact Action version so cloned workflows do not follow changes to `main`. The
+older Chinook demo is archived; use the maintained project for current examples. If your
 project needs local fixtures, prepare them before validation, as shown in the
 [Action's demo acceptance workflow](.github/workflows/test.yml).
 
